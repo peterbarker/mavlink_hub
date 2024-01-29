@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 from __future__ import print_function
 
@@ -6,6 +6,7 @@ from pymavlink import mavutil
 import sys
 import time
 import threading
+import struct
 
 class Connection():
     def __init__(self, addr):
@@ -32,12 +33,14 @@ class Connection():
         return self._active
 
 class MAVLinkHub():
-    def __init__(self, addrs):
+    def __init__(self, addrs, tlog=None):
         self.addrs = addrs
         self.conns = []
         self.connection_maintenance_target_should_live = True
         self.inactivity_timeout = 10
         self.reconnect_interval = 5
+        self.tlog_filepath = tlog
+        self.tlog = None
 
     def maintain_connections(self):
         now = time.time()
@@ -61,10 +64,20 @@ class MAVLinkHub():
             print("Creating connection (%s)" % addr)
             self.conns.append(Connection(addr))
 
+    def write_to_tlog(self, conn_index, m):
+        # construct a timestamp which encodes the incoming link in the
+        # bottom 3 bits of the value:
+        timestamp = int(time.time() * 1.0e6)
+        timestamp = timestamp & ~0b111
+        if conn_index > 7:
+            conn_index = 7
+        timestamp |= conn_index
+        self.tlog.write(bytearray(struct.pack('>Q', timestamp) + m.get_msgbuf()))
+
     def handle_messages(self):
         now = time.time()
         packet_received = False
-        for conn in self.conns:
+        for (conn_index, conn) in enumerate(self.conns):
             if not conn.active():
                 continue
             m = None
@@ -85,10 +98,19 @@ class MAVLinkHub():
                         continue
 #                    print("  Resending message on connection %s" % (j.addr,))
                     j.mav.write(m.get_msgbuf())
+
+                if self.tlog is not None:
+                    self.write_to_tlog(conn_index, m)
+
         if not packet_received:
             time.sleep(0.01)
 
+    def open_tlog(self):
+        self.tlog = open(self.tlog_filepath, mode="wb")
+
     def init(self):
+        if self.tlog_filepath is not None:
+            self.open_tlog()
         self.create_connections()
         self.create_connection_maintenance_thread()
         
@@ -113,12 +135,16 @@ class MAVLinkHub():
 
 if __name__ == '__main__':
 
-    import optparse
-    parser = optparse.OptionParser("mavlink_hub.py [options]")
-    (opts, args) = parser.parse_args()
+    import argparse
+    parser = argparse.ArgumentParser(description="link multiple mavlink connections.")
+    parser.add_argument(
+        '--tlog',
+        type=str,
+        help='filepath to write tlog to',
+    )
+    parser.add_argument("link", nargs="+")
 
-    hub = MAVLinkHub(args)
-    if len(args) == 0:
-        print("Insufficient arguments")
-        sys.exit(1)
+    args = parser.parse_args()
+
+    hub = MAVLinkHub(args.link, tlog=args.tlog)
     hub.run()
